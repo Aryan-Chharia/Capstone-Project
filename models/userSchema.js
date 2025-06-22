@@ -3,6 +3,8 @@
  * @description Mongoose schema and model for User.
  */
 
+const mongoose = require("mongoose");
+
 // User schema structure
 const UserSchema = new mongoose.Schema(
 	{

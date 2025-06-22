@@ -2,6 +2,7 @@
  * @file models/project.js
  * @description Mongoose schema and model for Project.
  */
+const mongoose = require("mongoose");
 
 // Project schema structure
 const ProjectSchema = new mongoose.Schema(

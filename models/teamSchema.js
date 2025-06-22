@@ -2,7 +2,7 @@
  * @file models/team.js
  * @description Mongoose schema and model for Team.
  */
-
+const mongoose = require("mongoose");
 // Team schema structure
 const TeamSchema = new mongoose.Schema(
 	{

@@ -2,7 +2,7 @@
  * @file models/organization.js
  * @description Mongoose schema and model for Organization.
  */
-
+const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 
 // Organization schema structure

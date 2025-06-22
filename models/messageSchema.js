@@ -2,7 +2,7 @@
  * @file models/message.js
  * @description Mongoose schema and model for Message.
  */
-
+const mongoose = require("mongoose");
 // Message schema structure
 const MessageSchema = new mongoose.Schema(
 	{

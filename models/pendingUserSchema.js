@@ -2,7 +2,7 @@
  * @file models/pendingUser.js
  * @description Mongoose schema and model for PendingUser.
  */
-
+const mongoose = require("mongoose");
 // PendingUser schema structure
 const PendingUserSchema = new mongoose.Schema({
 	name: {
