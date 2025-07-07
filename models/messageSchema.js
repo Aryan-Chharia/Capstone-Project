@@ -18,8 +18,16 @@ const MessageSchema = new mongoose.Schema(
 		},
 		content: {
 			type: String,
-			required: true,
 			trim: true,
+		},
+		imageUrl: {
+			type: String,
+			default: null,
+		},
+		messageType: {
+			type: String,
+			enum: ["text", "image", "both"],
+			default: "text",
 		},
 		confidenceScore: {
 			type: Number,

@@ -17,7 +17,13 @@ const router = express.Router();
  * @desc    Send a message to the LLM for a given project
  * @access  Private
  */
-router.post("/", verifyToken, chatHandler);
+
+router.post(
+  "/chat",
+  verifyToken,
+  upload.single("image"),
+  chatHandler
+);
 
 /**
  * @route   GET /:projectId

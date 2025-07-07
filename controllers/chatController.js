@@ -1,140 +1,202 @@
 /**
  * @file controllers/chatController.js
- * @description Controller for Chat-related routes (sending/receiving messages via LLM).
+ * @description Handles per-project chat using GitHub‑AI, persisting messages in MongoDB.
  */
 
+require("dotenv").config();
+const ModelClient = require("@azure-rest/ai-inference").default;
+const { isUnexpected } = require("@azure-rest/ai-inference");
+const { AzureKeyCredential } = require("@azure/core-auth");
+const Project = require("../models/projectSchema");
+const Team = require("../models/teamSchema");
 const Chat = require("../models/chatSchema");
 const Message = require("../models/messageSchema");
-const Project = require("../models/projectSchema");
+
+/** GitHub‑AI / Azure REST config from .env */
+const TOKEN = process.env.GITHUB_TOKEN;
+const ENDPOINT = process.env.GITHUB_AI_ENDPOINT;
+const MODEL = process.env.GITHUB_AI_MODEL;
 
 /**
- * Assumes you have an OpenAI configuration file that exports a `chatWithBot` function.
- * chatWithBot should accept (message: string, history: Array<{ role, content }>) and return:
- * { text: string, confidenceScore?: number }.
+ * @typedef {import("express").Request} Request
+ * @property {Object} user                       - from verifyToken
+ * @property {string} user.userId
+ * @property {string} user.organization
+ * @property {string} user.role                  - global role: "user"|"team_admin"|"superadmin"
+ * @property {Object} body
+ * @property {string} body.projectId             - ID of the project to chat in
+ * @property {string} body.content               - User’s message content
  */
-const { chatWithBot } = require("../config/open-ai");
 
 /**
- * @typedef {Object} Request
- * @property {Object} body - Parsed JSON request body.
- * @property {Object} params - URL parameters.
- * @property {Object} query - Query string parameters.
- * @property {Object} user - Authenticated user payload (from JWT), includes userId and organization.
- */
-
-/**
- * @typedef {Object} Response
- * @property {Function} status - Function to set HTTP status.
- * @property {Function} json - Function to send JSON response.
+ * @typedef {import("express").Response} Response
  */
 
 /**
  * @function
  * @name chatHandler
- * @description Handle a user sending a new chat message to the LLM for a given project.
- *              Steps:
- *               1. Verify projectId and message exist in body.
- *               2. Load the project, ensure it belongs to user’s org.
- *               3. Save user’s message to Message collection, push into Chat.messages.
- *               4. Call chatWithBot() to get LLM response.
- *               5. Save LLM’s response as a Message (sender: “chatbot”) and push to Chat.messages.
- *               6. Return the LLM’s text and confidenceScore.
+ * @description
+ *   - Validates the requester belongs to the project’s team (or is team_admin/superadmin)
+ *   - Saves the user’s message (text or image)
+ *   - Sends it to GitHub‑AI only if text exists
+ *   - Saves bot reply (text only)
+ *   - Returns the bot’s text + confidenceScore (if any)
  *
- * @param {Request} req - Express request object.
- * @param {Response} res - Express response object.
- * @returns {Promise<void>}
+ * @param {Request} req
+ * @param {Response} res
  */
-const chatHandler = async (req, res) => {
-	const { projectId, message } = req.body;
-	if (!projectId || !message || !message.trim()) {
-		return res
-			.status(400)
-			.json({ error: "projectId and non-empty message are required." });
-	}
+async function chatHandler(req, res) {
 	try {
-		// 1) Load project and verify org ownership
-		const project = await Project.findById(projectId).populate("chat team");
+		const { projectId, content } = req.body;
+		const imageUrl = req.file?.path || null;
+		if (!projectId || (!content?.trim() && !imageUrl)) {
+			return res.status(400).json({
+				error: "projectId and at least one of content or imageUrl are required.",
+			});
+		}
+
+		// 1) Load project + its team + members
+		const project = await Project.findById(projectId).populate({
+			path: "team",
+			populate: { path: "members.user", select: "_id role" },
+		});
 		if (!project) {
 			return res.status(404).json({ error: "Project not found." });
 		}
-		if (
-			project.team.organization.toString() !== req.user.organization.toString()
-		) {
-			return res
-				.status(403)
-				.json({ error: "Not authorized for this project." });
+		const team = project.team;
+		const { userId, organization, role: globalRole } = req.user;
+
+		// 2) Superadmin can bypass
+		if (globalRole !== "superadmin") {
+			// 3) Organization check
+			if (team.organization.toString() !== organization.toString()) {
+				return res.status(403).json({ error: "Not in this organization." });
+			}
+			// 4) Team membership check
+			const memberEntry = team.members.find(
+				(m) => m.user._id.toString() === userId.toString()
+			);
+			if (!memberEntry) {
+				return res.status(403).json({ error: "Not a member of this team." });
+			}
 		}
 
-		// 2) Ensure chat exists for this project
-		let chatDoc = project.chat;
-		if (!chatDoc) {
-			// If for some reason chat was not created at project creation time, create it
-			chatDoc = await Chat.create({ project: project._id, messages: [] });
-			project.chat = chatDoc._id;
-			await project.save();
+		// 5) Upsert Chat doc
+		let chat = await Chat.findOne({ project: project._id });
+		if (!chat) {
+			chat = await Chat.create({ project: project._id, messages: [] });
 		}
 
-		// 3) Save the user’s message
-		const userMsgDoc = await Message.create({
-			chat: chatDoc._id,
+		// 6) Persist user message (text and/or image)
+		const userMsg = await Message.create({
+			chat: chat._id,
 			sender: "user",
-			content: message.trim(),
+			content: content?.trim() || null,
+			imageUrl: imageUrl,
 		});
-		await Chat.findByIdAndUpdate(chatDoc._id, {
-			$push: { messages: userMsgDoc._id },
-		});
+		chat.messages.push(userMsg._id);
+		await chat.save();
 
-		// 4) (Optional) Build chat history to pass to the LLM for context
-		//    For brevity, passing only the latest user message in this example.
-		const response = await chatWithBot(message.trim(), []);
+		// 7) If content exists, send to GitHub-AI and store response
+		if (content?.trim()) {
+			const client = ModelClient(ENDPOINT, new AzureKeyCredential(TOKEN));
 
-		// 5) Save the LLM’s response
-		const botMsgDoc = await Message.create({
-			chat: chatDoc._id,
-			sender: "chatbot",
-			content: response.text,
-			confidenceScore: response.confidenceScore || null,
-		});
-		await Chat.findByIdAndUpdate(chatDoc._id, {
-			$push: { messages: botMsgDoc._id },
-		});
+			const messagesPayload = [
+				{ role: "system", content: "You are a helpful assistant." },
+				{ role: "user", content: content.trim() },
+			];
 
-		// 6) Return response to client
-		return res.json({
-			success: true,
-			botReply: response.text,
-			confidenceScore: response.confidenceScore || null,
-			messageId: botMsgDoc._id,
-		});
-	} catch (error) {
-		console.error("Chatbot Error:", error.message);
-		res.status(500).json({ error: "Internal server error." });
+			const response = await client
+				.path("/chat/completions")
+				.post({ body: { model: MODEL, messages: messagesPayload } });
+
+			if (isUnexpected(response)) {
+				throw new Error(response.body.error?.message || "AI error");
+			}
+
+			const botText = response.body.choices[0].message.content;
+			const confidence = response.body.choices[0].message.confidenceScore ?? null;
+
+			const botMsg = await Message.create({
+				chat: chat._id,
+				sender: "chatbot",
+				content: botText,
+				confidenceScore: confidence,
+			});
+			chat.messages.push(botMsg._id);
+			await chat.save();
+
+			return res.json({ botReply: botText, confidenceScore: confidence });
+		}
+
+		// 8) If no content, no bot reply needed
+		return res.json({ success: true, message: "Image-only message saved." });
+	} catch (err) {
+		console.error("Chat handler error:", err);
+		return res.status(500).json({ error: "Internal server error." });
 	}
-};
+}
+
+
 /**
  * @function
  * @name getChatHistory
- * @description Get full message history for a given project’s chat.
- * @access  Private
+ * @description
+ *   Returns the full chat history for a given project:
+ *     - Ensures requester is a member of the project’s team, a team_admin, or superadmin
+ *     - Ensures the team belongs to the user’s organization
+ *   Populates and returns all messages chronologically.
+ *
+ * @param {import("express").Request} req
+ * @param {import("express").Response} res
  */
 const getChatHistory = async (req, res) => {
 	try {
 		const { projectId } = req.params;
+		const { userId, organization, role: globalRole } = req.user;
+
+		// Load project + team + members
 		const project = await Project.findById(projectId).populate({
-			path: "chat",
-			populate: { path: "messages", options: { sort: { createdAt: 1 } } },
+			path: "team",
+			populate: { path: "members.user", select: "_id role" },
 		});
-		if (
-			!project ||
-			project.team.organization.toString() !== req.user.organization.toString()
-		) {
-			return res.status(404).json({ error: "Chat not found or unauthorized" });
+		if (!project) {
+			return res.status(404).json({ error: "Project not found." });
 		}
-		res.json({ success: true, chat: project.chat });
-	} catch (error) {
-		res.status(500).json({ error: "Server error" });
+		const team = project.team;
+
+		// superadmin bypass
+		if (globalRole !== "superadmin") {
+			// org check
+			if (team.organization.toString() !== organization.toString()) {
+				return res.status(403).json({ error: "Not in this organization." });
+			}
+			// membership check
+			const memberEntry = team.members.find(
+				(m) => m.user._id.toString() === userId.toString()
+			);
+			if (!memberEntry) {
+				return res.status(403).json({ error: "Not a member of this team." });
+			}
+		}
+
+		// Now fetch the chat & messages
+		const chat = await Chat.findOne({ project: project._id }).populate({
+			path: "messages",
+			options: { sort: { createdAt: 1 } },
+		});
+
+		if (!chat) {
+			return res.status(404).json({ error: "Chat not found." });
+		}
+
+		return res.json({ chat });
+	} catch (err) {
+		console.error("Get Chat History Error:", err);
+		return res.status(500).json({ error: "Server error." });
 	}
 };
+
 module.exports = {
 	chatHandler,
 	getChatHistory,
