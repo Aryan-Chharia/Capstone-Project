@@ -18,17 +18,21 @@ connectDB();
 // Apply express middleware and config
 expressConfig(app);
 
-// Mount routes
-app.use("/", routes);
-
 /**
  * @route   GET /
- * @desc    Render index page after token verification
- * @access  Private
+ * @desc    API root endpoint
+ * @access  Public
  */
-app.get("/", verifyToken, (req, res) => {
-	res.render("index", { user: req.user || null });
+app.get("/", (req, res) => {
+	res.json({
+		success: true,
+		message: "Backend API is running",
+		version: "1.0.0"
+	});
 });
+
+// Mount routes
+app.use("/", routes);
 
 // Start server
 const PORT = process.env.PORT || 3000;

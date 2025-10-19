@@ -3,6 +3,7 @@
  * @description Mongoose schema and model for PendingUser.
  */
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 // PendingUser schema structure
 const PendingUserSchema = new mongoose.Schema({
 	name: {

@@ -9,6 +9,7 @@ const {
 	getChatHistory,
 } = require("../controllers/chatController");
 const { verifyToken } = require("../middlewares/auth");
+const upload = require("../middlewares/upload");
 
 const router = express.Router();
 
